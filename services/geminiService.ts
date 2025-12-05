@@ -77,6 +77,12 @@ export class GeminiService {
   constructor() {
     // Initialize inside constructor to handle missing keys gracefully at startup
     const apiKey = process.env.API_KEY || "";
+    
+    // Warning for debugging key issues
+    if (apiKey && apiKey.startsWith("sk-")) {
+      console.warn("WARNING: You seem to be using an OpenRouter/OpenAI key (starts with 'sk-') but this app uses the Google GenAI SDK. Requests will likely fail.");
+    }
+
     this.ai = new GoogleGenAI({ apiKey });
     this.chat = this.createChatInstance([]);
   }
@@ -106,8 +112,7 @@ export class GeminiService {
     
     // The API generally expects the history to start with a User message (or System, which is handled via config).
     // If our history starts with a Model message (e.g., welcome message), we should drop it from the API context
-    // to avoid validation errors, unless it's a continued turn (which this simple logic doesn't fully track).
-    // For safety, if the first message is 'model', we remove it from the context sent to API.
+    // to avoid validation errors.
     if (history.length > 0 && history[0].role === 'model') {
        history.shift();
     }
@@ -116,6 +121,10 @@ export class GeminiService {
   }
 
   async sendMessage(message: string): Promise<AsyncGenerator<string, void, unknown>> {
+    if (!process.env.API_KEY) {
+      throw new Error("API Key is missing. Please check your .env file or Vercel settings.");
+    }
+
     try {
       // Send initial message
       let response = await this.chat.sendMessageStream({ message });
@@ -144,7 +153,6 @@ export class GeminiService {
       }
       
       // Check for function calls in this chunk
-      // Safe navigation for candidates and parts
       const candidates = chunk.candidates;
       if (candidates && candidates[0] && candidates[0].content && candidates[0].content.parts) {
         for (const part of candidates[0].content.parts) {
