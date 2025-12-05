@@ -10,9 +10,6 @@ import {
 } from "@google/genai";
 import { ToolName, Message } from "../types";
 
-// Initialize Gemini Client
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 const SYSTEM_INSTRUCTION = `You are Reena, a SUPER-TALENTED assistant. Speak fluently in Nepali and English; prefer Nepali when user writes Nepali.
 Behaviors:
 - Be accurate, concise, and explain reasoning steps when asked.
@@ -74,15 +71,19 @@ const executeGetTime = (): string => {
 
 // 3. Main Service Class
 export class GeminiService {
+  private ai: GoogleGenAI;
   private chat: Chat;
 
   constructor() {
+    // Initialize inside constructor to handle missing keys gracefully at startup
+    const apiKey = process.env.API_KEY || "";
+    this.ai = new GoogleGenAI({ apiKey });
     this.chat = this.createChatInstance([]);
   }
 
   // Helper to create a chat instance with optional history
   private createChatInstance(history: Content[]): Chat {
-    return ai.chats.create({
+    return this.ai.chats.create({
       model: 'gemini-3-pro-preview',
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
@@ -143,7 +144,7 @@ export class GeminiService {
       }
       
       // Check for function calls in this chunk
-      // FIX: Added safe navigation for candidates and parts
+      // Safe navigation for candidates and parts
       const candidates = chunk.candidates;
       if (candidates && candidates[0] && candidates[0].content && candidates[0].content.parts) {
         for (const part of candidates[0].content.parts) {
