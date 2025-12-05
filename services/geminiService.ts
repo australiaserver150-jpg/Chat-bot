@@ -143,8 +143,9 @@ export class GeminiService {
       }
       
       // Check for function calls in this chunk
+      // FIX: Added safe navigation for candidates and parts
       const candidates = chunk.candidates;
-      if (candidates && candidates[0]) {
+      if (candidates && candidates[0] && candidates[0].content && candidates[0].content.parts) {
         for (const part of candidates[0].content.parts) {
           if (part.functionCall) {
             functionCalls.push(part.functionCall);

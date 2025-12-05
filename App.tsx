@@ -120,7 +120,7 @@ export default function App() {
     // 1. Add User Message
     const userMessage: Message = {
       id: Date.now().toString(),
-      role: 'user',
+      role: 'user' as const,
       content: userText,
       timestamp: Date.now()
     };
@@ -150,7 +150,7 @@ export default function App() {
       // Update UI with initial empty bot message
       setMessages(prev => [...prev, {
         id: modelMessageId,
-        role: 'model',
+        role: 'model' as const,
         content: '',
         timestamp: Date.now()
       }]);
@@ -167,7 +167,7 @@ export default function App() {
       // Final update to session with complete conversation
       const finalMessages = [...newMessages, {
         id: modelMessageId,
-        role: 'model',
+        role: 'model' as const,
         content: modelContent,
         timestamp: Date.now()
       }];
@@ -179,7 +179,7 @@ export default function App() {
       console.error(error);
       const errorMessage: Message = {
         id: Date.now().toString(),
-        role: 'model',
+        role: 'model' as const,
         content: "Sorry, I encountered an error. Please try again.",
         isError: true,
         timestamp: Date.now()
