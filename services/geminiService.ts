@@ -26,7 +26,7 @@ Memory & Context:
 Tooling:
 - If a tool is available (calculator, time), call it.`;
 
-// 1. Define Tool Declarations
+// 1. Define Tool Declarations (Google SDK format)
 const calculatorTool: FunctionDeclaration = {
   name: ToolName.CALCULATOR,
   description: "Perform mathematical calculations. Use this for any math request.",
@@ -54,8 +54,6 @@ const timeTool: FunctionDeclaration = {
 // 2. Define Tool Implementations
 const executeCalculator = (expression: string): string => {
   try {
-    // Safety: In a real app, use a safer math parser. 
-    // For this demo, we'll strip non-math chars and use Function constructor strictly.
     const sanitized = expression.replace(/[^0-9+\-*/().\sMathsincostanlogsqrt]/g, '');
     // eslint-disable-next-line no-new-func
     const result = new Function(`return ${sanitized}`)();
@@ -71,24 +69,29 @@ const executeGetTime = (): string => {
 
 // 3. Main Service Class
 export class GeminiService {
-  private ai: GoogleGenAI;
-  private chat: Chat;
+  private ai: GoogleGenAI | null = null;
+  private chat: Chat | null = null;
+  private apiKey: string;
+  private isOpenRouter: boolean = false;
+  private openRouterHistory: { role: string, content: string }[] = [];
 
   constructor() {
-    // Initialize inside constructor to handle missing keys gracefully at startup
-    const apiKey = process.env.API_KEY || "";
+    this.apiKey = process.env.API_KEY || "";
     
-    // Warning for debugging key issues
-    if (apiKey && apiKey.startsWith("sk-")) {
-      console.warn("WARNING: You seem to be using an OpenRouter/OpenAI key (starts with 'sk-') but this app uses the Google GenAI SDK. Requests will likely fail.");
+    // Check if it's an OpenRouter key
+    if (this.apiKey.startsWith("sk-or-v1")) {
+      this.isOpenRouter = true;
+      console.log("Reena Bot: OpenRouter Key detected. Switching to OpenRouter API.");
+    } else if (this.apiKey) {
+      // Standard Google Key
+      this.ai = new GoogleGenAI({ apiKey: this.apiKey });
+      this.chat = this.createChatInstance([]);
     }
-
-    this.ai = new GoogleGenAI({ apiKey });
-    this.chat = this.createChatInstance([]);
   }
 
-  // Helper to create a chat instance with optional history
+  // Helper to create a chat instance with optional history (Google SDK)
   private createChatInstance(history: Content[]): Chat {
+    if (!this.ai) throw new Error("Google SDK not initialized");
     return this.ai.chats.create({
       model: 'gemini-3-pro-preview',
       config: {
@@ -100,104 +103,194 @@ export class GeminiService {
     });
   }
 
-  // Re-initialize the chat with a specific history (used when switching sessions)
+  // Re-initialize the chat with a specific history
   public startChat(messages: Message[]) {
-    // Map internal Message format to SDK Content format
-    const history: Content[] = messages
-      .filter(m => m.role !== 'system' && !m.isError) // Filter out system UI messages and errors
-      .map(m => ({
-        role: m.role,
-        parts: [{ text: m.content }]
-      }));
-    
-    // The API generally expects the history to start with a User message (or System, which is handled via config).
-    // If our history starts with a Model message (e.g., welcome message), we should drop it from the API context
-    // to avoid validation errors.
-    if (history.length > 0 && history[0].role === 'model') {
-       history.shift();
-    }
+    if (this.isOpenRouter) {
+      // For OpenRouter, we just convert and store the array
+      this.openRouterHistory = messages
+        .filter(m => !m.isError)
+        .map(m => {
+          let role = m.role === 'model' ? 'assistant' : m.role;
+          if (role === 'system') role = 'system'; // keep system
+          return {
+            role: role,
+            content: m.content
+          };
+        });
+      
+      // Ensure system instruction is present for OpenRouter
+      const hasSystem = this.openRouterHistory.some(m => m.role === 'system');
+      if (!hasSystem) {
+        this.openRouterHistory.unshift({ role: 'system', content: SYSTEM_INSTRUCTION });
+      }
 
-    this.chat = this.createChatInstance(history);
+    } else {
+      // Google SDK Logic
+      if (!this.ai) return; // Wait for init or error in sendMessage
+
+      const history: Content[] = messages
+        .filter(m => m.role !== 'system' && !m.isError)
+        .map(m => ({
+          role: m.role,
+          parts: [{ text: m.content }]
+        }));
+      
+      if (history.length > 0 && history[0].role === 'model') {
+         history.shift();
+      }
+
+      this.chat = this.createChatInstance(history);
+    }
   }
 
   async sendMessage(message: string): Promise<AsyncGenerator<string, void, unknown>> {
-    if (!process.env.API_KEY) {
+    if (!this.apiKey) {
       throw new Error("API Key is missing. Please check your .env file or Vercel settings.");
     }
 
+    if (this.isOpenRouter) {
+      return this.sendOpenRouterMessage(message);
+    } else {
+      return this.sendGoogleMessage(message);
+    }
+  }
+
+  // --- OpenRouter Implementation ---
+  private async *sendOpenRouterMessage(message: string): AsyncGenerator<string, void, unknown> {
+    // Add user message to history
+    this.openRouterHistory.push({ role: 'user', content: message });
+
     try {
-      // Send initial message
-      let response = await this.chat.sendMessageStream({ message });
-      
-      return this.handleStreamLoop(response);
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://reena-chat.vercel.app", // Optional: required by OpenRouter for ranking
+          "X-Title": "Reena Chat Bot"
+        },
+        body: JSON.stringify({
+          model: "google/gemini-2.0-flash-001", // Using a reliable Gemini model on OpenRouter
+          messages: this.openRouterHistory,
+          stream: true
+        })
+      });
+
+      if (!response.ok) {
+        const err = await response.text();
+        throw new Error(`OpenRouter Error: ${err}`);
+      }
+
+      if (!response.body) throw new Error("No response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulatedText = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') break;
+            
+            try {
+              const json = JSON.parse(data);
+              const content = json.choices[0]?.delta?.content;
+              if (content) {
+                accumulatedText += content;
+                yield accumulatedText;
+              }
+            } catch (e) {
+              // ignore parse errors for partial chunks
+            }
+          }
+        }
+      }
+
+      // Update history with the full response
+      this.openRouterHistory.push({ role: 'assistant', content: accumulatedText });
 
     } catch (error) {
-      console.error("Gemini Error:", error);
+      console.error("OpenRouter Error:", error);
       throw error;
     }
   }
 
-  private async *handleStreamLoop(
-    stream: AsyncIterable<GenerateContentResponse>
-  ): AsyncGenerator<string, void, unknown> {
-    
-    let accumulatedText = "";
-    let functionCalls: FunctionCall[] = [];
+  // --- Google SDK Implementation ---
+  private async *sendGoogleMessage(message: string): AsyncGenerator<string, void, unknown> {
+    if (!this.chat) {
+       // Try to re-init if key exists
+       this.ai = new GoogleGenAI({ apiKey: this.apiKey });
+       this.chat = this.createChatInstance([]);
+    }
 
-    // 1. Consume the stream
-    for await (const chunk of stream) {
-      // Check for text
-      if (chunk.text) {
-        accumulatedText += chunk.text;
-        yield accumulatedText;
-      }
+    try {
+      let response = await this.chat.sendMessageStream({ message });
       
-      // Check for function calls in this chunk
-      const candidates = chunk.candidates;
-      if (candidates && candidates[0] && candidates[0].content && candidates[0].content.parts) {
-        for (const part of candidates[0].content.parts) {
-          if (part.functionCall) {
-            functionCalls.push(part.functionCall);
+      let accumulatedText = "";
+      let functionCalls: FunctionCall[] = [];
+
+      for await (const chunk of response) {
+        if (chunk.text) {
+          accumulatedText += chunk.text;
+          yield accumulatedText;
+        }
+        
+        const candidates = chunk.candidates;
+        if (candidates && candidates[0] && candidates[0].content && candidates[0].content.parts) {
+          for (const part of candidates[0].content.parts) {
+            if (part.functionCall) {
+              functionCalls.push(part.functionCall);
+            }
           }
         }
       }
-    }
 
-    // 2. If we had function calls, we must execute them and send results back
-    if (functionCalls.length > 0) {
-      yield accumulatedText + "\n\n*Processing tool...*";
-      
-      const functionResponses: FunctionResponse[] = [];
+      if (functionCalls.length > 0) {
+        yield accumulatedText + "\n\n*Processing tool...*";
+        
+        const functionResponses: FunctionResponse[] = [];
 
-      for (const call of functionCalls) {
-        let result = "";
-        if (call.name === ToolName.CALCULATOR) {
-          const args = call.args as { expression: string };
-          result = executeCalculator(args.expression);
-        } else if (call.name === ToolName.GET_TIME) {
-          result = executeGetTime();
+        for (const call of functionCalls) {
+          let result = "";
+          if (call.name === ToolName.CALCULATOR) {
+            const args = call.args as { expression: string };
+            result = executeCalculator(args.expression);
+          } else if (call.name === ToolName.GET_TIME) {
+            result = executeGetTime();
+          }
+
+          functionResponses.push({
+            id: call.id,
+            name: call.name,
+            response: { result },
+          });
         }
 
-        functionResponses.push({
-          id: call.id,
-          name: call.name,
-          response: { result },
+        const toolResponseParts = functionResponses.map(fr => ({
+          functionResponse: fr
+        }));
+        
+        const nextStream = await this.chat.sendMessageStream({
+          message: toolResponseParts
         });
-      }
 
-      // Send tool responses back to model
-      const toolResponseParts = functionResponses.map(fr => ({
-        functionResponse: fr
-      }));
-      
-      const nextStream = await this.chat.sendMessageStream({
-        message: toolResponseParts
-      });
-
-      // Loop the new stream
-      for await (const nextChunk of this.handleStreamLoop(nextStream)) {
-         yield nextChunk; 
+        for await (const chunk of nextStream) {
+           if (chunk.text) {
+             accumulatedText += chunk.text;
+             yield accumulatedText;
+           }
+        }
       }
+    } catch (error) {
+      console.error("Gemini Error:", error);
+      throw error;
     }
   }
 }
